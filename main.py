@@ -2,18 +2,25 @@ from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, JSONResponse
 import requests, secrets
 from urllib.parse import urlencode
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 app = FastAPI()
 
-CLIENT_ID = "ac189f0d-639c-4e3e-b7c0-e881e74bb53f"
-REDIRECT_URI = "http://localhost:8000/callback"
+# Epic Sandbox Credentials
+CLIENT_ID = os.getenv("CLIENT_ID")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
 AUTH_URL = "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/authorize"
 TOKEN_URL = "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/token"
 FHIR_BASE = "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4"
 
+
 @app.get("/")
 def home():
-    return {"message": "Welcome to the SMART on FHIR Epic test app."}
+    """Entry point"""
+    return {"message": "Welcome to the SMART on FHIR Epic test app. Go to /login to begin."}
+
 
 @app.get("/login")
 def login():
@@ -22,11 +29,19 @@ def login():
         "client_id": CLIENT_ID,
         "response_type": "code",
         "redirect_uri": REDIRECT_URI,
-        "scope": "launch openid fhirUser patient/*.read",
+        "scope": (
+            "launch openid fhirUser "
+            "patient/Patient.read "
+            "patient/Observation.read "
+            "patient/Condition.read "
+            "patient/MedicationRequest.read"
+        ),
         "aud": FHIR_BASE,
         "state": state
     }
     return RedirectResponse(f"{AUTH_URL}?{urlencode(params)}")
+
+
 
 @app.get("/callback")
 def callback(request: Request):
@@ -34,6 +49,7 @@ def callback(request: Request):
     if not code:
         return JSONResponse({"error": "Missing authorization code"}, status_code=400)
 
+    # Step 1: Exchange code for access token
     data = {
         "grant_type": "authorization_code",
         "code": code,
@@ -42,21 +58,148 @@ def callback(request: Request):
     }
 
     token_response = requests.post(TOKEN_URL, data=data)
-    if token_response.status_code != 200:
-        return JSONResponse({"error": "Token exchange failed", "details": token_response.text}, status_code=400)
-
     token_json = token_response.json()
     access_token = token_json.get("access_token")
     patient_id = token_json.get("patient")
 
-    if not access_token:
-        return JSONResponse({"error": "No access token in response", "details": token_json}, status_code=400)
+    if not access_token or not patient_id:
+        return JSONResponse(
+            {"error": "Missing token or patient ID", "details": token_json},
+            status_code=400
+        )
 
-    headers = {"Authorization": f"Bearer {access_token}"}
-    fhir_url = f"{FHIR_BASE}/Patient/{patient_id}" if patient_id else f"{FHIR_BASE}/Patient"
-    patient_response = requests.get(fhir_url, headers=headers)
+    # Step 2: Set headers
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/fhir+json"
+    }
 
-    if patient_response.status_code != 200:
-        return JSONResponse({"error": "Failed to fetch patient data", "details": patient_response.text}, status_code=400)
+    # Helper to fetch FHIR resources
+    def fhir_get(resource: str):
+        url = f"{FHIR_BASE}/{resource}"
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            return {
+                "error": f"{resource} request failed",
+                "status": resp.status_code,
+                "body": resp.text[:500]
+            }
+        return resp.json()
 
-    return patient_response.json()
+    # Step 3: Fetch full data
+    patient = fhir_get(f"Patient/{patient_id}")
+    conditions = fhir_get(f"Condition?patient={patient_id}")
+    observations = fhir_get(f"Observation?patient={patient_id}&category=laboratory")
+    medications = fhir_get(f"MedicationRequest?patient={patient_id}")
+
+    # Step 4: Return everything together
+    return {
+        "patient": patient,
+        "conditions": conditions,
+        "observations": observations,
+        "medications": medications
+    }
+
+
+
+
+# @app.get("/callback")
+# def callback(request: Request):
+#     code = request.query_params.get("code")
+#     if not code:
+#         return JSONResponse({"error": "Missing authorization code"}, status_code=400)
+
+#     # Step 1: Exchange code for token
+#     data = {
+#         "grant_type": "authorization_code",
+#         "code": code,
+#         "redirect_uri": REDIRECT_URI,
+#         "client_id": CLIENT_ID
+#     }
+
+#     token_response = requests.post(TOKEN_URL, data=data)
+#     token_json = token_response.json()
+#     access_token = token_json.get("access_token")
+#     patient_id = token_json.get("patient")
+
+#     if not access_token or not patient_id:
+#         return JSONResponse({
+#             "error": "Missing token or patient ID",
+#             "details": token_json
+#         }, status_code=400)
+
+#     # Step 2: Request patient data in JSON
+#     headers = {
+#         "Authorization": f"Bearer {access_token}",
+#         "Accept": "application/fhir+json"
+#     }
+
+#     patient_url = f"{FHIR_BASE}/Patient/{patient_id}"
+#     patient_response = requests.get(patient_url, headers=headers)
+
+#     if patient_response.status_code != 200:
+#         return JSONResponse({
+#             "error": "FHIR request failed",
+#             "status": patient_response.status_code,
+#             "details": patient_response.text
+#         }, status_code=400)
+
+#     try:
+#         return patient_response.json()
+#     except Exception as e:
+#         return JSONResponse({
+#             "error": "FHIR JSON parse failed",
+#             "details": str(e),
+#             "raw_text": patient_response.text[:500]
+#         }, status_code=500)
+
+
+
+# @app.get("/callback")
+# def callback(request: Request):
+#     code = request.query_params.get("code")
+#     if not code:
+#         return JSONResponse({"error": "Missing authorization code"}, status_code=400)
+
+#     data = {
+#         "grant_type": "authorization_code",
+#         "code": code,
+#         "redirect_uri": REDIRECT_URI,
+#         "client_id": CLIENT_ID,
+#     }
+
+#     token_response = requests.post(TOKEN_URL, data=data)
+#     token_json = token_response.json()
+#     access_token = token_json.get("access_token")
+#     patient_id = token_json.get("patient")
+
+#     if not access_token or not patient_id:
+#         return JSONResponse({"error": "Missing token or patient id", "details": token_json}, status_code=400)
+
+#     headers = {
+#         "Authorization": f"Bearer {access_token}",
+#         "Accept": "application/fhir+json"
+#     }
+
+#     def fhir_get(resource):
+#         url = f"{FHIR_BASE}/{resource}"
+#         resp = requests.get(url, headers=headers)
+#         return resp.json() if resp.status_code == 200 else {"error": resp.text}
+
+#     patient = fhir_get(f"Patient/{patient_id}")
+#     observations = fhir_get(f"Observation?patient={patient_id}")
+#     medications = fhir_get(f"MedicationRequest?patient={patient_id}")
+#     conditions = fhir_get(f"Condition?patient={patient_id}")
+
+#     return {
+#         "patient": {
+#             "id": patient_id,
+#             "name": patient["name"][0]["text"],
+#             "gender": patient.get("gender"),
+#             "birthDate": patient.get("birthDate")
+#         },
+#         "observations_count": len(observations.get("entry", [])),
+#         "medications_count": len(medications.get("entry", [])),
+#         "conditions_count": len(conditions.get("entry", [])),
+#         "sample_lab": observations.get("entry", [{}])[0].get("resource", {}).get("code", {})
+#     }
