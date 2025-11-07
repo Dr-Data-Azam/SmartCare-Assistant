@@ -1,31 +1,30 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse, JSONResponse
-import requests
+import requests, secrets
 from urllib.parse import urlencode
 
 app = FastAPI()
 
-# Replace this with your actual Client ID from Epic
-CLIENT_ID = "YOUR_CLIENT_ID"
+CLIENT_ID = "ac189f0d-639c-4e3e-b7c0-e881e74bb53f"
 REDIRECT_URI = "http://localhost:8000/callback"
 AUTH_URL = "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/authorize"
 TOKEN_URL = "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/token"
 FHIR_BASE = "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4"
 
 @app.get("/")
-def root():
-    return {"message": "Epic SMART on FHIR Test — Go to /login to start."}
+def home():
+    return {"message": "Welcome to the SMART on FHIR Epic test app."}
 
 @app.get("/login")
 def login():
-    # SMART requires 'aud' (audience = FHIR base URL)
+    state = secrets.token_urlsafe(16)
     params = {
         "client_id": CLIENT_ID,
         "response_type": "code",
         "redirect_uri": REDIRECT_URI,
         "scope": "launch openid fhirUser patient/*.read",
         "aud": FHIR_BASE,
-        "state": "xyz"
+        "state": state
     }
     return RedirectResponse(f"{AUTH_URL}?{urlencode(params)}")
 
@@ -39,20 +38,24 @@ def callback(request: Request):
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": REDIRECT_URI,
-        "client_id": CLIENT_ID,
+        "client_id": CLIENT_ID
     }
 
     token_response = requests.post(TOKEN_URL, data=data)
+    if token_response.status_code != 200:
+        return JSONResponse({"error": "Token exchange failed", "details": token_response.text}, status_code=400)
+
     token_json = token_response.json()
+    access_token = token_json.get("access_token")
+    patient_id = token_json.get("patient")
 
-    if "access_token" not in token_json:
-        return JSONResponse({"error": "Token exchange failed", "details": token_json}, status_code=400)
+    if not access_token:
+        return JSONResponse({"error": "No access token in response", "details": token_json}, status_code=400)
 
-    access_token = token_json["access_token"]
     headers = {"Authorization": f"Bearer {access_token}"}
+    fhir_url = f"{FHIR_BASE}/Patient/{patient_id}" if patient_id else f"{FHIR_BASE}/Patient"
+    patient_response = requests.get(fhir_url, headers=headers)
 
-    # Try fetching one patient (you could also use token_json["patient"] if available)
-    patient_response = requests.get(f"{FHIR_BASE}/Patient", headers=headers)
     if patient_response.status_code != 200:
         return JSONResponse({"error": "Failed to fetch patient data", "details": patient_response.text}, status_code=400)
 
